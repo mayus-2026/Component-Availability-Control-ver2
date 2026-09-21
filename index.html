@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Component Availability Control Tower &mdash; v1</title>
+<script src="xlsx.lib.js"></script>
+<link rel="stylesheet" href="index.css">
+</head>
+<body>
+
+<header class="appbar">
+  <div class="brand">
+    <span class="mark"></span>
+    <div>
+      <h1>Component Availability Control Tower <span class="version-tag">v1 &middot; offline</span></h1>
+      <div class="sub">FG / Component Stock vs Demand &mdash; Plant-Level Planner Cockpit</div>
+    </div>
+  </div>
+  <div class="appbar-right">
+    <span class="file-tag" id="fileTag"></span>
+    <button class="btn btn-ghost" id="loadNewBtn" style="display:none;">Load new extract</button>
+  </div>
+</header>
+
+<div class="landing" id="landing">
+  <h2>Upload a Stock-vs-Demand extract</h2>
+  <p class="lede">Drop the query output (.xlsx or .csv) here. Everything runs locally in this file &mdash; no internet connection is used or required, including the Excel-parsing engine, which is built into this HTML file.</p>
+  <div class="dropzone" id="dropzone">
+    <div class="dz-icon">&#9633;</div>
+    <div class="dz-main">Click to browse, or drag a file here</div>
+    <div class="dz-sub">.xlsx or .csv &mdash; up to ~150k rows tested</div>
+    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv">
+  </div>
+  <div class="spec-box">
+    <h3>Expected columns (auto-matched, order-independent)</h3>
+    <div class="spec-cols">
+      <span>plant</span><span>company_code</span><span>fg_material</span><span>fg_description</span>
+      <span>bom_level</span><span>parent_material</span><span>bom_item_number</span><span>bom_item_path</span>
+      <span>component_material</span><span>component_description</span><span>sales_order</span>
+      <span>item_number</span><span>schedule_line</span><span>requirement_date</span><span>fg_demand</span>
+      <span>bom_qty_per_fg</span><span>gross_child_part_demand_to_cover_fg</span><span>gross_child_part_stock</span>
+      <span>gross_shortage_or_excess</span><span>gross_status_flag</span><span>net_demand_this_line</span>
+      <span>net_coverage_flag</span><span>bom_number</span><span>component_uom</span>
+    </div>
+  </div>
+  <div id="parseStatus"></div>
+  <div class="offline-note">This file has no external dependencies &mdash; you can save it locally and open it by double-clicking, with no internet connection.</div>
+</div>
+
+<div id="app">
+<main>
+
+  <div class="plant-bar" id="plantBar">
+    <span class="pb-label">Plant view</span>
+    <select id="globalPlantFilter"><option value="">All plants (combined)</option></select>
+    <span class="pb-note" id="plantBarNote"></span>
+    <button class="pb-clear" id="plantBarClear" style="display:none;">Clear &mdash; show all plants</button>
+  </div>
+
+  <div id="topBanners"></div>
+  <div class="kpi-row" id="kpiRow"></div>
+  <div class="narrative card" id="narrative"></div>
+
+  <nav class="tabs">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="fgfocus">FG Focus</button>
+    <button data-tab="procpriority">Procurement Priority</button>
+    <button data-tab="stockvis">Stock Visibility</button>
+    <button data-tab="simulator">Supply Simulator</button>
+    <button data-tab="timerisk">Aging &amp; Delivery Risk</button>
+    <button data-tab="plants">Plant Breakdown</button>
+    <button data-tab="integrity">Data Integrity</button>
+    <button data-tab="explorer">Data Explorer</button>
+  </nav>
+
+  <!-- OVERVIEW -->
+  <section class="panel active" id="panel-overview">
+    <div class="grid-2">
+      <div class="card">
+        <h3>Net Coverage Mix</h3>
+        <div class="card-sub">Every demand line, after cascading netting across BOM levels</div>
+        <div id="coverageChart"></div>
+      </div>
+      <div class="card">
+        <h3>Demand Lines by BOM Level</h3>
+        <div class="card-sub">How deep the shortage is propagating down the bill of materials</div>
+        <div id="levelChart"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Sales orders with the most exposure</h3>
+      <div class="card-sub">Distinct sales orders carrying uncovered demand, ranked by number of short lines</div>
+      <div class="scroll-x"><table id="soTable"></table></div>
+    </div>
+  </section>
+
+  <!-- FG FOCUS -->
+  <section class="panel" id="panel-fgfocus">
+    <div class="card">
+      <h3>Find a finished good</h3>
+      <div class="card-sub">Search by material code or description &mdash; e.g. type <b>cable</b> or a specific FG code. Click a row to see exactly which components (and how much stock of each) are blocking it.</div>
+      <div class="filters-bar">
+        <input type="text" id="fgSearch" placeholder="Search FG code or description, e.g. 'brake cable'&hellip;">
+        <label>Sort</label>
+        <select id="fgSort">
+          <option value="short_desc">Most blocked components first</option>
+          <option value="qty_desc">Highest open demand qty first</option>
+          <option value="readiness_asc">Lowest readiness % first</option>
+          <option value="date_asc">Earliest due date first</option>
+        </select>
+      </div>
+      <div style="font-size:12px;color:var(--steel-600);margin-bottom:8px;" id="fgListCount"></div>
+      <div class="scroll-x"><table id="fgListTable"></table></div>
+      <div class="pager">
+        <span id="fgPageInfo"></span>
+        <button id="fgPrevPage">&larr; Prev</button>
+        <button id="fgNextPage">Next &rarr;</button>
+      </div>
+    </div>
+
+    <div class="card" id="fgDetailCard" style="display:none;">
+      <div class="fg-detail-head">
+        <div>
+          <div class="code" id="fgDetailCode"></div>
+          <h2 id="fgDetailName"></h2>
+        </div>
+        <button class="close-focus" id="fgDetailClose">&times; close</button>
+      </div>
+      <div class="fg-stat-grid" id="fgDetailStats"></div>
+      <h3 style="margin-top:4px;">Level-1 components required to build this FG</h3>
+      <div class="card-sub">Sorted with the tightest constraint first, including current available stock. The FG cannot fully complete until every row here shows a green coverage pill.</div>
+      <div class="scroll-x"><table id="fgDetailTable"></table></div>
+    </div>
+  </section>
+
+  <!-- PROCUREMENT PRIORITY -->
+  <section class="panel" id="panel-procpriority">
+    <div class="card">
+      <h3>Which components to focus on first</h3>
+      <div class="card-sub">Ranked by how many finished goods each component is currently blocking &mdash; resolving the top rows unlocks the most FG completions per unit of procurement effort.</div>
+      <div class="filters-bar">
+        <label>Impact scope</label>
+        <select id="ppScope">
+          <option value="direct">Direct only (Level 1 &mdash; what the FG itself consumes)</option>
+          <option value="all">Full cascade (all levels &mdash; includes upstream sub-assembly needs)</option>
+        </select>
+        <label>Coverage</label>
+        <select id="ppCoverage">
+          <option value="short" selected>Not covered + Partially covered</option>
+          <option value="notcovered">Not covered only</option>
+        </select>
+        <input type="text" id="ppSearch" placeholder="Search component code or description&hellip;">
+      </div>
+      <div style="font-size:12px;color:var(--steel-600);margin-bottom:8px;" id="ppCount"></div>
+      <div class="scroll-x"><table id="ppTable"></table></div>
+      <div class="pager">
+        <span id="ppPageInfo"></span>
+        <button id="ppPrevPage">&larr; Prev</button>
+        <button id="ppNextPage">Next &rarr;</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- STOCK VISIBILITY -->
+  <section class="panel" id="panel-stockvis">
+    <div class="card">
+      <h3>Component stock position</h3>
+      <div class="card-sub">Available stock vs. total open gross demand for every component, derived directly from the report's own cascading stock math (the first line in each component's priority queue carries its true starting stock). Use this to sanity-check a procurement or expedite decision before committing.</div>
+      <div class="filters-bar">
+        <label>BOM level</label>
+        <select id="svLevel"><option value="1" selected>Level 1 (direct FG consumption)</option></select>
+        <label>Show</label>
+        <select id="svShow">
+          <option value="short" selected>Components with any shortfall</option>
+          <option value="all">All components</option>
+        </select>
+        <input type="text" id="svSearch" placeholder="Search component code or description&hellip;">
+      </div>
+      <div style="font-size:12px;color:var(--steel-600);margin-bottom:8px;" id="svCount"></div>
+      <div class="scroll-x"><table id="svTable"></table></div>
+      <div class="pager">
+        <span id="svPageInfo"></span>
+        <button id="svPrevPage">&larr; Prev</button>
+        <button id="svNextPage">Next &rarr;</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- SUPPLY SIMULATOR -->
+  <section class="panel" id="panel-simulator">
+    <div class="card">
+      <h3>What if I get more of this component?</h3>
+      <div class="card-sub">Replays the exact priority order the report already computes (requirement date &rarr; sales order &rarr; schedule line) to show precisely which open lines a given quantity injection would clear first.</div>
+      <div class="sim-grid">
+        <div class="sim-field">
+          <label>Component (type to search)</label>
+          <input type="text" id="simCompSearch" placeholder="Search component code or description&hellip;">
+        </div>
+        <div class="sim-field">
+          <label>Matching components</label>
+          <select id="simCompSelect" size="1"></select>
+        </div>
+        <div class="sim-field">
+          <label>Plant</label>
+          <select id="simPlantSelect"></select>
+        </div>
+        <div class="sim-field">
+          <label>BOM level</label>
+          <select id="simLevelSelect"></select>
+        </div>
+        <div class="sim-field">
+          <label>Incoming quantity</label>
+          <input type="number" id="simQty" min="0" step="1" placeholder="e.g. 5000">
+        </div>
+        <div class="sim-field">
+          <button class="btn btn-primary" id="simRunBtn" style="width:100%;">Run simulation</button>
+        </div>
+      </div>
+      <div class="sim-stock-line" id="simStockLine"></div>
+      <div id="simEmpty" style="font-size:13px;color:var(--steel-600);">Choose a component to begin. Components are pre-filtered to ones with at least one uncovered or partially-covered line (in the current plant view).</div>
+      <div class="sim-result" id="simResult">
+        <div class="sim-banner">
+          <div class="big" id="simHeadline"></div>
+          <div class="sub" id="simSubline"></div>
+        </div>
+        <div class="grid-2">
+          <div>
+            <h3 style="font-size:13px;">Lines this quantity fully clears</h3>
+            <div class="card-sub" id="simClearedSub"></div>
+            <div class="scroll-x"><table id="simClearedTable"></table></div>
+          </div>
+          <div>
+            <h3 style="font-size:13px;">Still short after this injection (next in line)</h3>
+            <div class="card-sub" id="simRemainSub"></div>
+            <div class="scroll-x"><table id="simRemainTable"></table></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- AGING / TIME RISK -->
+  <section class="panel" id="panel-timerisk">
+    <div class="card">
+      <h3>Uncovered / partially-covered lines by demand age</h3>
+      <div class="card-sub">
+        Bucketed by <b>calendar month</b>, not by day, against today (<span id="asOfLabel"></span>).
+        A line due earlier this month is treated as <b>current-month demand</b>, not past due &mdash; schedule lines are often one line per month of supply, so a day-level comparison is misleading.
+        A line due in a <b>previous month</b> is <b>past due</b>. A line <b>3 or more months</b> in the past is flagged separately as <b>old demand</b> &mdash; likely uncancelled, already-fulfilled-elsewhere, or simply never cleared in SAP, and worth a data-cleanup pass rather than a supply response.
+      </div>
+      <div id="timeChart"></div>
+    </div>
+    <div class="card">
+      <h3>Aged demand &mdash; worst offenders</h3>
+      <div class="card-sub">Sales orders whose requirement month has already passed and still show uncovered net demand, ranked by months late</div>
+      <div class="scroll-x"><table id="pastDueTable"></table></div>
+    </div>
+  </section>
+
+  <!-- PLANTS -->
+  <section class="panel" id="panel-plants">
+    <div class="card">
+      <h3>Plant-level exposure</h3>
+      <div class="card-sub">Where the shortage risk is concentrated across your plant network. This table always shows every plant, regardless of the plant-view selector above, so you can compare.</div>
+      <div class="scroll-x"><table id="plantTable"></table></div>
+    </div>
+  </section>
+
+  <!-- INTEGRITY -->
+  <section class="panel" id="panel-integrity">
+    <div class="card">
+      <h3>Automated data-quality checks</h3>
+      <div class="card-sub">Re-runs the validation logic documented in the query header (V1&ndash;V4) against whatever file you just loaded.</div>
+      <div class="integrity-list" id="integrityList"></div>
+    </div>
+    <div class="card">
+      <h3>Scope detected in this file</h3>
+      <div id="scopeDetail" style="font-size:13px;line-height:1.9;"></div>
+    </div>
+    <div class="card">
+      <h3>Methodology notes</h3>
+      <div style="font-size:13px;line-height:1.7;color:var(--steel-600);">
+        <p><b>Stock figures</b> shown throughout this tool are derived, not a separate column in the source file: the report's SELECT only exposes running/cumulative stock positions per line, so "available stock" here is read from the first line in each component's priority queue (where cumulative demand = 0), which mathematically equals the true starting stock for that (component, plant, BOM level) group.</p>
+        <p><b>BOM-level stock partitioning:</b> each level's cumulative-demand window is partitioned independently by (component, plant) <i>per level</i>. If the same component appears both as a direct Level&#8209;1 item and as an upstream Level&#8209;2+ requirement feeding a different cascade, each level checks that component's full starting stock independently rather than sharing one depleting pool. This can slightly overstate availability where a component is genuinely shared across a direct-use path and a replenishment-cascade path. The Supply Simulator respects this same partitioning, so results are only directly comparable within one BOM level at a time.</p>
+        <p><b>Aging buckets</b> compare calendar months, not days: a requirement date anywhere in the current month is "current month" even if that date has already passed this month.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- EXPLORER -->
+  <section class="panel" id="panel-explorer">
+    <div class="card">
+      <div class="filters-bar">
+        <label>Plant</label><select id="fPlant"><option value="">All</option></select>
+        <label>BOM level</label><select id="fLevel"><option value="">All</option></select>
+        <label>Coverage</label>
+        <select id="fCoverage"><option value="">All</option><option value="FULLY">Fully covered</option><option value="PARTIALLY">Partially covered</option><option value="NOT COVERED">Not covered</option></select>
+        <label>Min net qty</label><input type="number" id="fMinQty" placeholder="0" style="min-width:80px;">
+        <input type="text" id="fSearch" placeholder="Search FG, component, description or sales order&hellip;">
+        <button class="btn btn-outline" id="exportBtn">Export CSV</button>
+      </div>
+      <div style="font-size:12px;color:var(--steel-600);margin-bottom:8px;" id="explorerCount"></div>
+      <div class="scroll-x"><table id="explorerTable"></table></div>
+      <div class="pager">
+        <span id="pageInfo"></span>
+        <button id="prevPage">&larr; Prev</button>
+        <button id="nextPage">Next &rarr;</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+</div>
+
+<footer class="foot">Runs entirely inside this file &mdash; no data leaves this device, no internet connection used.</footer>
+
+<script src="index.js"></script>
+</body>
+</html>
